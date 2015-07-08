@@ -63,7 +63,7 @@ dumpinfo(struct tundev *tdev) {
 	for (i=0;i<tdev->remote_n;i++) {
 		s += tdev->in[i];
 		inet_ntop(AF_INET, &tdev->remote[i].sin_addr, tmp, sizeof(tmp));
-		printf("<- %s:%d %" PRId64 "\n", tmp, ntohs(tdev->remote[i].sin_port), tdev->in[i]);
+		printf("<- %s %" PRId64 "\n", tmp, tdev->in[i]);
 	}
 	printf("Total in %" PRId64 "\n", s);
 	printf("Untrack in %" PRId64 "\n", tdev->untrack);
@@ -150,7 +150,8 @@ add_remote(struct tundev *tdev, SOCKADDR *addr, int bytes) {
 	int mincount = MAX_COUNT;
 	int minidx = -1;
 	for (i=0;i<tdev->remote_n;i++) {
-		if (memcmp(addr, &tdev->remote[i], sizeof(*addr))==0) {
+		if (memcmp(&addr->sin_addr, &tdev->remote[i].sin_addr, sizeof(INADDR))==0) {
+			tdev->remote[i].sin_port = addr->sin_port;	// update port (NAT may change port)
 			if (++tdev->remote_count[i] > MAX_COUNT) {
 				int j;
 				for (j=0;j<tdev->remote_n;i++) {
