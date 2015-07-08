@@ -144,16 +144,48 @@ usage(void) {
 	exit(1);
 }
 
+static void
+add_remote(struct tundev *tdev, SOCKADDR *addr, int bytes) {
+	int i;
+	int mincount = MAX_COUNT;
+	int minidx = -1;
+	for (i=0;i<tdev->remote_n;i++) {
+		if (memcmp(addr, &tdev->remote[i], sizeof(*addr))==0) {
+			if (++tdev->remote_count[i] > MAX_COUNT) {
+				int j;
+				for (j=0;j<tdev->remote_n;i++) {
+					tdev->remote_count[i] /= 2;
+				}
+			}
+			tdev->in[i] += bytes;
+			return;
+		} else if (tdev->remote_count[i] < mincount) {
+			mincount = tdev->remote_count[i];
+			minidx = i;
+		}
+	}
+	if (tdev->remote_n < MAX_ADDRESS) {
+		i = tdev->remote_n++;
+	} else {
+		i = minidx;
+	}
+	tdev->remote[i] = *addr;
+	tdev->remote_count[i] = 0;
+	tdev->untrack += tdev->in[i];
+	tdev->in[i] = bytes;
+}
+
 // forward ip packet from internet to tun , and return peer address 
-static int
-inet_to_tun(struct tundev *tdev, int index, SOCKADDR *sa) {
+static void
+inet_to_tun(struct tundev *tdev, int index) {
+	SOCKADDR sa;
 	int inetfd = tdev->localfd[index];
 	int tunfd = tdev->tunfd; 
 	char buf[BUFF_SIZE];
 	ssize_t n;
 	for (;;) {
-		socklen_t addrlen = sizeof(*sa);
-		n = recvfrom(inetfd, buf, BUFF_SIZE, 0,(struct sockaddr *)sa, &addrlen);
+		socklen_t addrlen = sizeof(sa);
+		n = recvfrom(inetfd, buf, BUFF_SIZE, 0,(struct sockaddr *)&sa, &addrlen);
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -162,14 +194,11 @@ inet_to_tun(struct tundev *tdev, int index, SOCKADDR *sa) {
 				perror("recvfrom");
 				exit(1);
 				// fail
-				return 0;
 			}
 		} else {
 			break;
 		}
 	}
-
-	tdev->in[index] += n;
 
 //	char tmp[1024];
 //	inet_ntop(AF_INET, &sa->sin_addr, tmp, sizeof(tmp));
@@ -183,7 +212,6 @@ inet_to_tun(struct tundev *tdev, int index, SOCKADDR *sa) {
 			else {
 				perror("write tun");
 				exit(1);
-				return 0;
 			}
 		} else {
 			break;
@@ -192,7 +220,7 @@ inet_to_tun(struct tundev *tdev, int index, SOCKADDR *sa) {
 //	printf("Write %d bytes to tun %d\n", (int)n, tunfd);
 
 	// succ
-	return 1;
+	add_remote(tdev, &sa, (int)n);
 }
 
 static void
@@ -311,36 +339,6 @@ tun_to_inet(struct tundev *tdev, fd_set *wt) {
 }
 
 static void
-add_remote(struct tundev *tdev, SOCKADDR *addr) {
-	int i;
-	int mincount = MAX_COUNT;
-	int minidx = -1;
-	for (i=0;i<tdev->remote_n;i++) {
-		if (memcmp(addr, &tdev->remote[i], sizeof(*addr))==0) {
-			if (++tdev->remote_count[i] > MAX_COUNT) {
-				int j;
-				for (j=0;j<tdev->remote_n;i++) {
-					tdev->remote_count[i] /= 2;
-				}
-			}
-			return;
-		} else if (tdev->remote_count[i] < mincount) {
-			mincount = tdev->remote_count[i];
-			minidx = i;
-		}
-	}
-	if (tdev->remote_n < MAX_ADDRESS) {
-		i = tdev->remote_n++;
-	} else {
-		i = minidx;
-	}
-	tdev->remote[i] = *addr;
-	tdev->remote_count[i] = 0;
-	tdev->untrack += tdev->out[i];
-	tdev->out[i] = 0;
-}
-
-static void
 forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wtset) {
 	int i;
 	fd_set rd,wt;
@@ -363,7 +361,6 @@ forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wts
 
 	for (i=0;i<tdev->local_n;i++) {
 		if (FD_ISSET(tdev->localfd[i], &rd)) {
-			SOCKADDR addr;
 			// forward ip packet of inet to tun
 			if (++tdev->local_count[i] > MAX_COUNT) {
 				int j;
@@ -371,9 +368,7 @@ forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wts
 					tdev->local_count[j] /= 2;
 				}
 			}
-			if (inet_to_tun(tdev, i, &addr)) {
-				add_remote(tdev, &addr);
-			}
+			inet_to_tun(tdev, i);
 		}
 	}
 
