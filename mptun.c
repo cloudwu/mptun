@@ -241,6 +241,7 @@ dumpinfo(struct tundev *tdev) {
 	}
 	printf("Total in %" PRId64 "\n", s);
 	printf("Untrack in %" PRId64 "\n", tdev->untrack);
+	printf("Invalid in %" PRId64 "\n", tdev->invalid);
 }
 
 static void
@@ -314,6 +315,7 @@ usage(void) {
 		"\t-r <remoteIP> : specify remote address, it can specify multi times. (or zero, if you run as server) \n"
 		"\t-l <localIP> : specify local address, it can specify multi times. (or zero, if you run as server) \n"
 		"\t-p <port> : specify port for tunnel\n"
+		"\t-k <key> : optional password\n"
 	);
 	exit(1);
 }
