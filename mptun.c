@@ -197,18 +197,21 @@ encrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, tim
 
 static int
 decrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, time_t ti) {
-	uint32_t pt, check, h;
+	uint32_t pt, check;
+	uint64_t h;
 	struct rc4_sbox rs;
 	sz -= 8;
-	if (sz < 0)
+	if (sz < 0) {
 		return -1;
+	}
 
 	memcpy(&pt, in, 4);
 	memcpy(&check, in+4, 4);
 	pt = ntohl(pt);
 	check = ntohl(check);
-	if (abs((int)(pt - ti)) > TIME_DIFF)
+	if (abs((int)(pt - ti)) > TIME_DIFF) {
 		return -1;
+	}
 	key = hmac(key, pt);
 	rc4_init(&rs, key);
 
@@ -216,8 +219,9 @@ decrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, tim
 	h = hash_key(out, sz);
 	key ^= h;
 
-	if (check != key)
+	if (check != ((uint32_t)key ^ (uint32_t)(key >> 32))) {
 		return -1;
+	}
 	return sz;
 }
 
@@ -359,7 +363,7 @@ inet_to_tun(struct tundev *tdev, int index) {
 	int inetfd = tdev->localfd[index];
 	int tunfd = tdev->tunfd; 
 	char buf[BUFF_SIZE], outbuff[BUFF_SIZE];
-	ssize_t n;
+	ssize_t n, rn;
 	for (;;) {
 		socklen_t addrlen = sizeof(sa);
 		n = recvfrom(inetfd, buf, BUFF_SIZE, 0,(struct sockaddr *)&sa, &addrlen);
@@ -377,15 +381,15 @@ inet_to_tun(struct tundev *tdev, int index) {
 		}
 	}
 
-	n = decrypt(buf, n, outbuff, tdev->key, tdev->ti);
+	rn = decrypt(buf, n, outbuff, tdev->key, tdev->ti);
 
-	if (n < 0) {
+	if (rn < 0) {
 		tdev->invalid += n;
 		return;
 	}
 
 	for (;;) {
-		int ret = write(tunfd, outbuff, n);
+		int ret = write(tunfd, outbuff, rn);
 		if (ret < 0) {
 			if (errno == EINTR) {
 				continue;
