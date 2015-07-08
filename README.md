@@ -26,7 +26,7 @@ if you specify multiple local ip , that means multiple paths to server.
 
 About Code
 ==========
-The code is ugly, and just quick the dirty work for myself. It's not thoroughly tested, so of course there can be bugs. 
+The code is ugly, and just quick and dirty work for myself. It's not thoroughly tested, so of course there can be bugs. 
 Any pull request is welcome, but don't ask me why the implementation is it :)
 
 License
