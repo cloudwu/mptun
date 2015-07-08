@@ -8,12 +8,14 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <fcntl.h>
 #include <arpa/inet.h> 
 #include <sys/select.h>
 #include <sys/time.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <signal.h>
+#include <inttypes.h>
 
 #define MAX_ADDRESS 16
 #define BASE_COUNT 64
@@ -26,6 +28,8 @@
 typedef struct sockaddr_in SOCKADDR;
 typedef struct in_addr INADDR;
 
+static int SIG = 0;
+
 struct tundev {
 	int port;
 	int tunfd;
@@ -36,7 +40,42 @@ struct tundev {
 	int localfd[MAX_ADDRESS];
 	int remote_count[MAX_ADDRESS];
 	int local_count[MAX_ADDRESS];
+	uint64_t in[MAX_ADDRESS];
+	uint64_t out[MAX_ADDRESS];
+	uint64_t drop;
+	uint64_t untrack;
 };
+
+static void
+dumpinfo(struct tundev *tdev) {
+	char tmp[1024];
+//	inet_ntop(AF_INET, &sa->sin_addr, tmp, sizeof(tmp));
+	int i;
+	uint64_t s = 0;
+	for (i=0;i<tdev->local_n;i++) {
+		s += tdev->out[i];
+		inet_ntop(AF_INET, &tdev->local[i], tmp, sizeof(tmp));
+		printf("-> %s %" PRId64 "\n", tmp, tdev->out[i]);
+	}
+	printf("Total out %" PRId64 "\n", s);
+	printf("Drop out %" PRId64 "\n", tdev->drop);
+	s = 0;
+	for (i=0;i<tdev->remote_n;i++) {
+		s += tdev->in[i];
+		inet_ntop(AF_INET, &tdev->remote[i].sin_addr, tmp, sizeof(tmp));
+		printf("<- %s:%d %" PRId64 "\n", tmp, ntohs(tdev->remote[i].sin_port), tdev->in[i]);
+	}
+	printf("Total in %" PRId64 "\n", s);
+	printf("Untrack in %" PRId64 "\n", tdev->untrack);
+}
+
+static void
+dumpinfo_hup(struct tundev *tdev) {
+	if (SIG) {
+		dumpinfo(tdev);
+		SIG = 0;
+	}
+}
 
 static int
 tun_alloc(char *dev) {
@@ -107,7 +146,9 @@ usage(void) {
 
 // forward ip packet from internet to tun , and return peer address 
 static int
-inet_to_tun(int inetfd, int tunfd, SOCKADDR *sa) {
+inet_to_tun(struct tundev *tdev, int index, SOCKADDR *sa) {
+	int inetfd = tdev->localfd[index];
+	int tunfd = tdev->tunfd; 
 	char buf[BUFF_SIZE];
 	ssize_t n;
 	for (;;) {
@@ -127,10 +168,12 @@ inet_to_tun(int inetfd, int tunfd, SOCKADDR *sa) {
 			break;
 		}
 	}
-	char tmp[1024];
-	inet_ntop(AF_INET, &sa->sin_addr, tmp, sizeof(tmp));
 
-	printf("Read %d bytes from inet %d %s:%d\n", (int)n, inetfd, tmp, ntohs(sa->sin_port));
+	tdev->in[index] += n;
+
+//	char tmp[1024];
+//	inet_ntop(AF_INET, &sa->sin_addr, tmp, sizeof(tmp));
+//	printf("Read %d bytes from inet %d %s:%d\n", (int)n, inetfd, tmp, ntohs(sa->sin_port));
 	for (;;) {
 		int ret = write(tunfd, buf, n);
 		if (ret < 0) {
@@ -146,14 +189,15 @@ inet_to_tun(int inetfd, int tunfd, SOCKADDR *sa) {
 			break;
 		}
 	}
-	printf("Write %d bytes to tun %d\n", (int)n, tunfd);
+//	printf("Write %d bytes to tun %d\n", (int)n, tunfd);
 
 	// succ
 	return 1;
 }
 
 static void
-drop_tun(int tunfd) {
+drop_tun(struct tundev *tdev) {
+	int tunfd = tdev->tunfd;
 	char buf[BUFF_SIZE];
 	ssize_t n;
 	for (;;) {
@@ -171,44 +215,7 @@ drop_tun(int tunfd) {
 			break;
 		}
 	}
-	printf("drop %d bytes\n", (int)n);
-}
-
-// forward ip packet from tun to internet with address
-static void
-tun_to_inet(int tunfd, int inetfd, SOCKADDR *addr) {
-	char buf[BUFF_SIZE];
-	ssize_t n;
-	for (;;) {
-		n = read(tunfd, buf, BUFF_SIZE);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			else {
-				perror("read tun");
-				exit(1);
-				return;
-			}
-		} else {
-			break;
-		}
-	}
-	printf("Read %d bytes from tun %d\n", (int)n, tunfd);
-
-	for (;;) {
-		int ret = sendto(inetfd, buf, n, 0, (struct sockaddr *)addr, sizeof(SOCKADDR));
-		if (ret < 0 && errno == EINTR) {
-			continue;
-		} else {
-			break;
-		}
-	}
-
-	char tmp[1024];
-	inet_ntop(AF_INET, &addr->sin_addr, tmp, sizeof(tmp));
-
-	printf("Write %d bytes to inet %d %s:%d\n", (int)n, inetfd, tmp, ntohs(addr->sin_port));
+	tdev->drop += n;
 }
 
 static int
@@ -260,6 +267,49 @@ choose_remote(struct tundev *tdev) {
 	return 0;
 }
 
+// forward ip packet from tun to internet with address
+static void
+tun_to_inet(struct tundev *tdev, fd_set *wt) {
+	int tunfd = tdev->tunfd;
+	int localindex = choose_local(tdev, wt);
+	int inetfd = tdev->localfd[localindex];
+	int remoteindex = choose_remote(tdev);
+	SOCKADDR * addr = &tdev->remote[remoteindex];
+	char buf[BUFF_SIZE];
+	ssize_t n;
+	for (;;) {
+		n = read(tunfd, buf, BUFF_SIZE);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			else {
+				perror("read tun");
+				exit(1);
+				return;
+			}
+		} else {
+			break;
+		}
+	}
+//	printf("Read %d bytes from tun %d\n", (int)n, tunfd);
+
+	for (;;) {
+		int ret = sendto(inetfd, buf, n, 0, (struct sockaddr *)addr, sizeof(SOCKADDR));
+		if (ret < 0 && errno == EINTR) {
+			continue;
+		} else {
+			break;
+		}
+	}
+	tdev->out[remoteindex] += n;
+
+//	char tmp[1024];
+//	inet_ntop(AF_INET, &addr->sin_addr, tmp, sizeof(tmp));
+
+//	printf("Write %d bytes to inet %d %s:%d\n", (int)n, inetfd, tmp, ntohs(addr->sin_port));
+}
+
 static void
 add_remote(struct tundev *tdev, SOCKADDR *addr) {
 	int i;
@@ -286,6 +336,8 @@ add_remote(struct tundev *tdev, SOCKADDR *addr) {
 	}
 	tdev->remote[i] = *addr;
 	tdev->remote_count[i] = 0;
+	tdev->untrack += tdev->out[i];
+	tdev->out[i] = 0;
 }
 
 static void
@@ -299,6 +351,7 @@ forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wts
 		int ret = select(maxrd, &rd, NULL, NULL, NULL);
 		if (ret < 0) {
 			if (errno == EINTR) {
+				dumpinfo_hup(tdev);
 				continue;
 			}
 			perror("select read");
@@ -318,7 +371,7 @@ forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wts
 					tdev->local_count[j] /= 2;
 				}
 			}
-			if (inet_to_tun(tdev->localfd[i], tdev->tunfd, &addr)) {
+			if (inet_to_tun(tdev, i, &addr)) {
 				add_remote(tdev, &addr);
 			}
 		}
@@ -331,6 +384,7 @@ forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wts
 			int ret = select(maxwt, NULL, &wt, NULL, NULL);
 			if (ret < 0) {
 				if (errno == EINTR) {
+					dumpinfo_hup(tdev);
 					continue;
 				}
 				perror("select write");
@@ -340,17 +394,23 @@ forwarding(struct tundev *tdev, int maxrd, fd_set *rdset, int maxwt, fd_set *wts
 			}
 		}
 		if (tdev->remote_n == 0) {
-			drop_tun(tdev->tunfd);
+			drop_tun(tdev);
 		} else {
-			tun_to_inet(tdev->tunfd, 
-				tdev->localfd[choose_local(tdev, &wt)],
-				&tdev->remote[choose_remote(tdev)]);
+			tun_to_inet(tdev, &wt);
 		}
 	}
 }
 
 static void
+handle_hup(int signal) {
+	if (signal == SIGHUP) {
+		SIG = 1;
+	}
+}
+
+static void
 start(struct tundev *tdev) {
+	struct sigaction sa;
 	int i;
 	int maxrd_fd = tdev->tunfd;
 	int maxwt_fd = -1;
@@ -367,7 +427,16 @@ start(struct tundev *tdev) {
 			maxwt_fd = tdev->localfd[i];
 	}
 
+	sa.sa_handler = &handle_hup;
+	sa.sa_flags = SA_RESTART;
+	sigfillset(&sa.sa_mask);
+	if (sigaction(SIGHUP, &sa, NULL) == -1) {
+		perror("handle SIGHUP");
+		exit(1);
+	}
+
 	for (;;) {
+		dumpinfo_hup(tdev);
 		forwarding(tdev, maxrd_fd+1, &rdset, maxwt_fd+1, &wtset);
 	}
 }
