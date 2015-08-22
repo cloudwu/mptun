@@ -334,8 +334,8 @@ add_remote(struct tundev *tdev, SOCKADDR *addr, int bytes) {
 			tdev->remote[i].sin_port = addr->sin_port;	// update port (NAT may change port)
 			if (++tdev->remote_count[i] > MAX_COUNT) {
 				int j;
-				for (j=0;j<tdev->remote_n;i++) {
-					tdev->remote_count[i] /= 2;
+				for (j=0;j<tdev->remote_n;j++) {
+					tdev->remote_count[j] /= 2;
 				}
 			}
 			tdev->in[i] += bytes;
