@@ -399,7 +399,7 @@ static inline ssize_t header_modify_read_write_return (ssize_t len)
 
 //read from utun
 static inline ssize_t
-utun_read(int fd, uint8_t *buf, int len) {
+utun_read(int fd, char *buf, int len) {
 	u_int32_t type;
 	struct iovec iv[2];
 	struct ip *iph;
@@ -420,7 +420,7 @@ utun_read(int fd, uint8_t *buf, int len) {
 }
 //write to utun
 static inline ssize_t
-utun_write(int fd, uint8_t *buf, int len)
+utun_write(int fd, char *buf, int len)
 {
 	u_int32_t type;
 	struct iovec iv[2];
