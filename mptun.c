@@ -4,8 +4,18 @@
 #include <unistd.h>
 #include <assert.h>
 #include <sys/socket.h>
+#if defined(__linux__)
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#elif defined(__APPLE__)
+#include <sys/ioctl.h>
+#include <sys/kern_control.h>
+#include <sys/uio.h>
+#include <sys/sys_domain.h>
+#include <net/if_utun.h>
+#include <netinet/ip.h>
+#define IFNAMSIZ 16
+#endif
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -19,11 +29,19 @@
 #include <inttypes.h>
 #include <time.h>
 
+#if defined(IFF_TUN)
+#define tun_read(...) read(__VA_ARGS__)
+#define tun_write(...) write(__VA_ARGS__)
+#elif defined(__APPLE__)
+#define tun_read(...) utun_read(__VA_ARGS__)
+#define tun_write(...) utun_write(__VA_ARGS__)
+#endif
+
 #define MAX_ADDRESS 16
 #define BASE_COUNT 64
 #define MAX_COUNT 16384
 /* buffer for reading , must be >= 1500 */
-#define BUFF_SIZE 2000   
+#define BUFF_SIZE 2000
 #define IP_SIZE 128
 /* 1 hour time diff */
 #define TIME_DIFF 3600
@@ -176,8 +194,8 @@ static const uint32_t r[] = {7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12,
 	return (uint64_t)(a^b) << 32 | (c^d);
 }
 
-static int
-encrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, time_t ti) {
+static inline int
+mptun_encrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, time_t ti) {
 	uint64_t h = hash_key(in, sz);
 	uint32_t tmp;
 	struct rc4_sbox rs;
@@ -195,8 +213,8 @@ encrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, tim
 	return sz + 8;
 }
 
-static int
-decrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, time_t ti) {
+static inline int
+mptun_decrypt(const char in[BUFF_SIZE], int sz, char out[BUFF_SIZE], uint64_t key, time_t ti) {
 	uint32_t pt, check;
 	uint64_t h;
 	struct rc4_sbox rs;
@@ -256,6 +274,7 @@ dumpinfo_hup(struct tundev *tdev) {
 	}
 }
 
+#if defined(IFF_TUN)
 static int
 tun_alloc(char *dev) {
 	struct ifreq ifr;
@@ -281,6 +300,147 @@ tun_alloc(char *dev) {
 
 	return fd;
 }
+#elif defined(__APPLE__)
+static int utun_open_helper (struct ctl_info ctlInfo, int utunnum)
+{
+	struct sockaddr_ctl sc;
+	int fd;
+
+	fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
+
+	if (fd < 0)
+	{
+		return -2;
+	}
+
+	if (ioctl(fd, CTLIOCGINFO, &ctlInfo) == -1)
+	{
+		close (fd);
+		return -2;
+	}
+
+
+	sc.sc_id = ctlInfo.ctl_id;
+	sc.sc_len = sizeof(sc);
+	sc.sc_family = AF_SYSTEM;
+	sc.ss_sysaddr = AF_SYS_CONTROL;
+
+	sc.sc_unit = utunnum+1;
+
+	/* If the connect is successful, a utun%d device will be created, where "%d"
+	 * is (sc.sc_unit - 1) */
+
+	if (connect (fd, (struct sockaddr *)&sc, sizeof(sc)) < 0)
+	{
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
+static int
+tun_alloc (char *dev)
+{
+	struct ctl_info ctlInfo;
+	int fd;
+	char utunname[20];
+	int utunnum =-1;
+	socklen_t utunname_len = sizeof(utunname);
+
+	if (strlcpy(ctlInfo.ctl_name, UTUN_CONTROL_NAME, sizeof(ctlInfo.ctl_name)) >=
+		sizeof(ctlInfo.ctl_name))
+	{
+		printf("Opening utun: UTUN_CONTROL_NAME too long\n");
+		return -1;
+	}
+
+	/* try to open first available utun device if no specific utun is requested */
+	if (utunnum == -1)
+	{
+		for (utunnum=0; utunnum<255; utunnum++)
+		{
+			fd = utun_open_helper (ctlInfo, utunnum);
+			 /* Break if the fd is valid,
+			  * or if early initalization failed (-2) */
+			if (fd !=-1)
+				break;
+		}
+	}
+	else
+	{
+		fd = utun_open_helper (ctlInfo, utunnum);
+	}
+
+	if(fd < 0) {
+		printf("failed to create fd\n");
+		return fd; //error
+	}
+
+	/* Retrieve the assigned interface name. */
+	if (getsockopt (fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, utunname, &utunname_len)) {
+		printf("Error retrieving utun interface name\n");
+		return -1;
+	}
+
+	printf("Opened utun device %s\n", utunname);
+	strcpy(dev, utunname); //return device name
+	return fd;
+}
+
+//remove the IP version header from the result of bytes read or written.
+static inline ssize_t header_modify_read_write_return (ssize_t len)
+{
+    if (len > 0)
+        return len > (ssize_t) sizeof(u_int32_t) ? len - sizeof(u_int32_t) : 0;
+    else
+        return len;
+}
+
+//read from utun
+static inline ssize_t
+utun_read(int fd, uint8_t *buf, int len) {
+	u_int32_t type;
+	struct iovec iv[2];
+	struct ip *iph;
+	
+	iph = (struct ip *) buf;
+
+	if(iph->ip_v == 6)
+		type = htonl(AF_INET6);
+	else
+		type = htonl(AF_INET);
+
+	iv[0].iov_base = (char *)&type;
+	iv[0].iov_len = sizeof (type);
+	iv[1].iov_base = buf;
+	iv[1].iov_len = len;
+
+	return header_modify_read_write_return(readv(fd, iv, 2));
+}
+//write to utun
+static inline ssize_t
+utun_write(int fd, uint8_t *buf, int len)
+{
+	u_int32_t type;
+	struct iovec iv[2];
+	struct ip *iph;
+
+	iph = (struct ip *) buf;
+
+	if(iph->ip_v == 6)
+		type = htonl(AF_INET6);
+	else
+		type = htonl(AF_INET);
+
+	iv[0].iov_base = (char *)&type;
+	iv[0].iov_len  = sizeof (type);
+	iv[1].iov_base = buf;
+	iv[1].iov_len  = len;
+
+	return header_modify_read_write_return(writev(fd, iv, 2));
+}
+#endif
 
 static int
 inet_bind(INADDR *addr, int port) {
@@ -313,11 +473,11 @@ static void
 usage(void) {
 	fprintf(stderr,
 		"Usage:\n"
-		"\t-i <ifacename>: Name of interface to use (for example: tun0)\n"
+		"\t-i <ifacename>: Name of interface to use (for example: tun0). Final interface name may change on OSX\n"
 		"\t-v <vpnlocalIP> : specify vpn address (for example: 10.0.0.1)\n"
 		"\t-t <vpnremoteIP> : specify vpn P-t-P address (for example: 10.0.0.2)\n"
-		"\t-r <remoteIP> : specify remote address, it can specify multi times. (or zero, if you run as server) \n"
-		"\t-l <localIP> : specify local address, it can specify multi times. (or zero, if you run as server) \n"
+		"\t-r <remoteIP> : specify remote address, it can specify multi times. (or zero, if you run as server)\n"
+		"\t-l <localIP> : specify local address, it can specify multi times. (or zero, if you run as server)\n"
 		"\t-p <port> : specify port for tunnel\n"
 		"\t-k <key> : optional password\n"
 	);
@@ -381,7 +541,7 @@ inet_to_tun(struct tundev *tdev, int index) {
 		}
 	}
 
-	rn = decrypt(buf, n, outbuff, tdev->key, tdev->ti);
+	rn = mptun_decrypt(buf, n, outbuff, tdev->key, tdev->ti);
 
 	if (rn < 0) {
 		tdev->invalid += n;
@@ -389,7 +549,7 @@ inet_to_tun(struct tundev *tdev, int index) {
 	}
 
 	for (;;) {
-		int ret = write(tunfd, outbuff, rn);
+		int ret = tun_write(tunfd, outbuff, rn);
 		if (ret < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -413,7 +573,7 @@ drop_tun(struct tundev *tdev) {
 	char buf[BUFF_SIZE];
 	ssize_t n;
 	for (;;) {
-		n = read(tunfd, buf, BUFF_SIZE);
+		n = tun_read(tunfd, buf, BUFF_SIZE);
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -490,7 +650,7 @@ tun_to_inet(struct tundev *tdev, fd_set *wt) {
 	char buf[BUFF_SIZE], outbuf[BUFF_SIZE];
 	ssize_t n;
 	for (;;) {
-		n = read(tunfd, buf, BUFF_SIZE);
+		n = tun_read(tunfd, buf, BUFF_SIZE);
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -505,7 +665,7 @@ tun_to_inet(struct tundev *tdev, fd_set *wt) {
 		}
 	}
 
-	n = encrypt(buf, n, outbuf, tdev->key, tdev->ti);
+	n = mptun_encrypt(buf, n, outbuf, tdev->key, tdev->ti);
 	if (n < 0) {
 		fprintf(stderr, "Invalid tun package size %d", (int)n);
 		return;
@@ -624,8 +784,13 @@ start(struct tundev *tdev) {
 static void
 ifconfig(const char * ifname, const char * va, const char *pa) {
 	char cmd[1024];
+#if defined(__APPLE__)
+	snprintf(cmd, sizeof(cmd), "ifconfig %s %s %s mtu 1380 netmask 255.255.255.255 up",
+		ifname, va, pa);
+#else
 	snprintf(cmd, sizeof(cmd), "ifconfig %s %s netmask 255.255.255.255 pointopoint %s",
 		ifname, va, pa);
+#endif
 	if (system(cmd) < 0) {
 		perror(cmd);
 		exit(1);
