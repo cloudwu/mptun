@@ -18,6 +18,11 @@ At client side :
 ```
 mptun -i tun0 -p PORT -v 10.0.0.1 -t 10.0.0.2 -r SERVER_IP1 -r SERVER_IP2 -l LOCAL_IP1 -l LOCAL_IP2 -k SECRET
 ```
+You can also omit -l argument, for short 
+```
+mptun -i tun0 -p PORT -v 10.0.0.1 -t 10.0.0.2 -r SERVER_IP1 -k SECRET
+```
+Now you can testing the connection, ping -c 3 10.0.0.2 for details
 
 The local ips only for sending package out (can be none public IP). 
 if you specify multiple local ip , that means multiple paths to server.
