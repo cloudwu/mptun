@@ -760,7 +760,7 @@ start(struct tundev *tdev) {
 	for (i=0;i<tdev->local_n;i++) {
 		int fd = tdev->localfd[i];
 		if (fd >= FD_SETSIZE) {
-			perror("fd is larger than FD_SETSIZE");
+			fprintf(stderr,"fd %d (%d) is larger than FD_SETSIZE", i, fd);
 			exit(1);
 		}
 		FD_SET(fd, &rdset);
