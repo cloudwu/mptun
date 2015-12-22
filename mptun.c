@@ -758,12 +758,17 @@ start(struct tundev *tdev) {
 	FD_ZERO(&wtset);
 	FD_SET(tdev->tunfd, &rdset);
 	for (i=0;i<tdev->local_n;i++) {
-		FD_SET(tdev->localfd[i], &rdset);
-		FD_SET(tdev->localfd[i], &wtset);
-		if (tdev->localfd[i] > maxrd_fd)
-			maxrd_fd = tdev->localfd[i];
-		if (tdev->localfd[i] > maxwt_fd)
-			maxwt_fd = tdev->localfd[i];
+		int fd = tdev->localfd[i];
+		if (fd >= FD_SETSIZE) {
+			perror("fd is larger than FD_SETSIZE");
+			exit(1);
+		}
+		FD_SET(fd, &rdset);
+		FD_SET(fd, &wtset);
+		if (fd > maxrd_fd)
+			maxrd_fd = fd;
+		if (fd > maxwt_fd)
+			maxwt_fd = fd;
 	}
 
 	sa.sa_handler = &handle_hup;
